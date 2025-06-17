@@ -16,6 +16,7 @@ if not custom_log.handlers:
     custom_log.propagate = False
 
 first_api_data_call = True
+NUM_AC_UNITS_CLIENT = 5 # Number of AC units client interacts with
 
 def read_registers(client, unit_id, fc, address, count):
     read_map = {
@@ -27,12 +28,20 @@ def read_registers(client, unit_id, fc, address, count):
         custom_log.error(f"Unsupported Function Code: {fc} for unit {unit_id}")
         return None, f"지원하지 않는 Function Code: {fc}"
     try:
-        custom_log.debug(f"Reading from unit {unit_id}, FC {fc}, addr {address}, count {count}")
+        custom_log.debug(f"Requesting data from unit {unit_id}, FC {fc}, addr {address}, count {count}")
         response = func(address, count=count, slave=unit_id)
+        if fc == 3:
+            custom_log.debug(f"Raw HR response object from unit {unit_id}, addr {address}: {response}")
+            if hasattr(response, 'registers'):
+                custom_log.debug(f"HR response.registers: {response.registers} (Length: {len(response.registers)})")
+            else:
+                custom_log.debug(f"HR response object does not have 'registers' attribute.")
         if response.isError():
             custom_log.warning(f"Modbus error from unit {unit_id}, FC {fc}, addr {address}: {response}")
             return None, f"읽기 오류: {response}"
-        return response.registers if fc == 3 else response.bits[:count], None
+        registers_data = response.registers if fc == 3 else response.bits[:count]
+        custom_log.debug(f"Extracted data for unit {unit_id}, FC {fc}, addr {address}: {registers_data} (Length: {len(registers_data) if registers_data is not None else 'None'})")
+        return registers_data, None
     except Exception as e:
         custom_log.error(f"Modbus 통신 예외 unit {unit_id}, FC {fc}, addr {address}: {e}", exc_info=True)
         return None, f"Modbus 통신 예외: {e}"
@@ -75,17 +84,17 @@ def get_data():
     else:
         app.logger.info("Request to /api/data (subsequent call)")
 
-    # Fetches data corresponding to 6 ACs (18 HR registers) from server per unit;
-    # frontend logic (JavaScript updateInterface) is responsible for displaying 5 ACs.
     client = ModbusTcpClient("127.0.0.1", port=5020, timeout=2)
     if not client.connect():
         custom_log.error("Failed to connect to Modbus server at 127.0.0.1:5020")
         return jsonify({"error": "Modbus 서버 연결 실패"}), 500
     try:
-        hr1_all, err1_hr = read_registers(client, 1, 3, 0, 18)
-        di1_status, err1_di = read_registers(client, 1, 2, 0, 6)
-        hr2_all, err2_hr = read_registers(client, 2, 3, 0, 18)
-        di2_status, err2_di = read_registers(client, 2, 2, 0, 6)
+        # Server HR block is 16 registers (5xtemp, 5xhigh, 5xgood, 1xdummy)
+        # Server DI/CO block is 5 bits
+        hr1_all, err1_hr = read_registers(client, 1, 3, 0, 16) # Request 16 HRs
+        di1_status, err1_di = read_registers(client, 1, 2, 0, NUM_AC_UNITS_CLIENT) # Request 5 DIs
+        hr2_all, err2_hr = read_registers(client, 2, 3, 0, 16) # Request 16 HRs
+        di2_status, err2_di = read_registers(client, 2, 2, 0, NUM_AC_UNITS_CLIENT) # Request 5 DIs
 
         errors = [e for e in [err1_hr, err1_di, err2_hr, err2_di] if e]
         if errors:
@@ -93,19 +102,24 @@ def get_data():
             return jsonify({"error": f"데이터 읽기 중 오류 발생: {'; '.join(errors)}"}), 500
 
         def process_hr_data(hr_data, unit_num_for_log):
-            if hr_data and len(hr_data) == 18:
-                return hr_data[0:6], hr_data[6:12], hr_data[12:18]
-            custom_log.warning(f"Invalid hr_data for unit {unit_num_for_log} from Modbus: Length {len(hr_data) if hr_data else 'None'}. Using defaults.")
-            return [15]*6, [27]*6, [20]*6
+            # Expects 16 registers: 5 temps, 5 high_T, 5 good_T, 1 dummy
+            if hr_data and len(hr_data) == 16:
+                temps = hr_data[0:NUM_AC_UNITS_CLIENT]
+                high_T = hr_data[NUM_AC_UNITS_CLIENT : NUM_AC_UNITS_CLIENT*2]
+                good_T = hr_data[NUM_AC_UNITS_CLIENT*2 : NUM_AC_UNITS_CLIENT*3]
+                # dummy_val = hr_data[NUM_AC_UNITS_CLIENT*3] # hr_data[15]
+                return temps, high_T, good_T
+            custom_log.warning(f"Invalid hr_data for unit {unit_num_for_log} from Modbus: Length {len(hr_data) if hr_data else 'None'}. Expected 16. Using defaults.")
+            return [15]*NUM_AC_UNITS_CLIENT, [27]*NUM_AC_UNITS_CLIENT, [20]*NUM_AC_UNITS_CLIENT
 
         temps1, high_T1, good_T1 = process_hr_data(hr1_all, 1)
         temps2, high_T2, good_T2 = process_hr_data(hr2_all, 2)
 
         def process_di_data(di_data, unit_num_for_log):
-            if di_data and len(di_data) == 6:
+            if di_data and len(di_data) == NUM_AC_UNITS_CLIENT:
                 return di_data
-            custom_log.warning(f"Invalid di_data for unit {unit_num_for_log} from Modbus: Length {len(di_data) if di_data else 'None'}. Using defaults.")
-            return [False]*6
+            custom_log.warning(f"Invalid di_data for unit {unit_num_for_log} from Modbus: Length {len(di_data) if di_data else 'None'}. Expected {NUM_AC_UNITS_CLIENT}. Using defaults.")
+            return [False]*NUM_AC_UNITS_CLIENT
 
         processed_di1_status = process_di_data(di1_status, 1)
         processed_di2_status = process_di_data(di2_status, 2)
@@ -132,8 +146,11 @@ def get_data():
 def set_coil():
     try:
         unit_id = int(request.args.get('unitId'))
-        address = int(request.args.get('address'))
+        address = int(request.args.get('address')) # acIndex 0-4
         value = bool(int(request.args.get('value')))
+        if not (0 <= address < NUM_AC_UNITS_CLIENT):
+             custom_log.warning(f"Invalid coil address (acIndex) in /api/write_coil: {address}")
+             return jsonify({"error": "잘못된 코일 주소입니다."}), 400
     except Exception as e:
         custom_log.warning(f"Invalid parameters for /api/write_coil: {request.args}, error: {e}")
         return jsonify({"error": "잘못된 파라미터 (코일)"}), 400
@@ -160,11 +177,11 @@ def set_coil():
 def set_temp_threshold():
     try:
         unit_id = int(request.args.get('unitId'))
-        ac_index = int(request.args.get('acIndex'))
+        ac_index = int(request.args.get('acIndex')) # Expected 0-4 from UI
         high_temp = int(request.args.get('highTemp'))
         good_temp = int(request.args.get('goodTemp'))
 
-        if not (0 <= ac_index <= 5):
+        if not (0 <= ac_index < NUM_AC_UNITS_CLIENT):
             custom_log.warning(f"Invalid ac_index in /api/write_temp_threshold: {ac_index}")
             return jsonify({"error": "잘못된 AC 인덱스입니다."}), 400
         if not (0 <= high_temp <= 50 and 0 <= good_temp <= 50 and good_temp < high_temp):
@@ -180,8 +197,11 @@ def set_temp_threshold():
         custom_log.error("Failed to connect to Modbus server for write_temp_threshold")
         return jsonify({"error": "Modbus 서버 연결 실패"}), 500
     try:
-        addr_high_T = 6 + ac_index
-        addr_good_T = 12 + ac_index
+        # Server HR addresses for thresholds: high_T = 5+ac_index, good_T = 10+ac_index
+        addr_high_T = NUM_AC_UNITS_CLIENT + ac_index # Base for high_T is 5 (0-4 are temps)
+        addr_good_T = NUM_AC_UNITS_CLIENT*2 + ac_index # Base for good_T is 10
+
+        custom_log.debug(f"Calculated HR addresses for thresholds: high_T_addr={addr_high_T}, good_T_addr={addr_good_T} for ac_index={ac_index}")
 
         success1, error1 = write_single_holding_register(client, unit_id, addr_high_T, high_temp)
         if not success1:

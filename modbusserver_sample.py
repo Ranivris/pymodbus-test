@@ -1,4 +1,4 @@
-# modbusserver_sample.py (renamed from modserver_sample.py)
+# modbusserver_sample.py
 
 import logging
 import threading
@@ -8,38 +8,32 @@ from pymodbus.datastore import (ModbusSequentialDataBlock, ModbusServerContext,
 from pymodbus.device import ModbusDeviceIdentification
 from pymodbus.server import StartTcpServer
 
-# Configure Pymodbus logging (and general logging) to be more verbose
-# This will make Pymodbus itself log more details about requests it handles.
-logging.basicConfig(level=logging.DEBUG) # Set root logger to DEBUG
-
-# Get our own logger for application-specific messages
+logging.basicConfig(level=logging.DEBUG)
 log = logging.getLogger('modbus_server_app')
-# If basicConfig was called, our logger will inherit its level unless set otherwise.
-# If we want our app logs to be less verbose than pymodbus, we can set its level higher, e.g.:
-# log.setLevel(logging.INFO)
-
-# For more targeted Pymodbus logging, you could try:
-# logging.getLogger('pymodbus').setLevel(logging.DEBUG)
-# logging.getLogger('pymodbus.server.async_io').setLevel(logging.DEBUG) # For TCP server details
-# logging.getLogger('pymodbus.protocol. παιδιά').setLevel(logging.DEBUG) # For Modbus PDU details
-# logging.getLogger('pymodbus.datastore.store').setLevel(logging.DEBUG) # For datastore access
 
 data_lock = threading.Lock()
 
-INITIAL_TEMPS = [15] * 6
-INITIAL_HIGH_THRESHOLDS = [27] * 6
-INITIAL_GOOD_THRESHOLDS = [20] * 6
+# Configuration for 5 AC units + 1 dummy register
+NUM_AC_UNITS = 5
+INITIAL_TEMPS = [15] * NUM_AC_UNITS
+INITIAL_HIGH_THRESHOLDS = [27] * NUM_AC_UNITS
+INITIAL_GOOD_THRESHOLDS = [20] * NUM_AC_UNITS
+LAST_DUMMY_VALUE = [0xFE] # Single dummy value, e.g., 0xFE (254)
 
-db1_hr_initial_values = INITIAL_TEMPS + INITIAL_HIGH_THRESHOLDS + INITIAL_GOOD_THRESHOLDS
-db2_hr_initial_values = INITIAL_TEMPS + INITIAL_HIGH_THRESHOLDS + INITIAL_GOOD_THRESHOLDS
+# HR block: 5 temps + 5 high_T + 5 good_T + 1 dummy = 16 registers
+db1_hr_initial_values = INITIAL_TEMPS + INITIAL_HIGH_THRESHOLDS + INITIAL_GOOD_THRESHOLDS + LAST_DUMMY_VALUE
+db2_hr_initial_values = INITIAL_TEMPS + INITIAL_HIGH_THRESHOLDS + INITIAL_GOOD_THRESHOLDS + LAST_DUMMY_VALUE
 
-db1_hr = ModbusSequentialDataBlock(0, db1_hr_initial_values)
-db1_co = ModbusSequentialDataBlock(0, [False] * 6)
-db1_di = ModbusSequentialDataBlock(0, [False] * 6)
+db1_hr = ModbusSequentialDataBlock(0, db1_hr_initial_values) # 16 registers
+db1_co = ModbusSequentialDataBlock(0, [False] * NUM_AC_UNITS) # 5 coils
+db1_di = ModbusSequentialDataBlock(0, [False] * NUM_AC_UNITS) # 5 discrete inputs
 
-db2_hr = ModbusSequentialDataBlock(0, db2_hr_initial_values)
-db2_co = ModbusSequentialDataBlock(0, [False] * 6)
-db2_di = ModbusSequentialDataBlock(0, [False] * 6)
+db2_hr = ModbusSequentialDataBlock(0, db2_hr_initial_values) # 16 registers
+db2_co = ModbusSequentialDataBlock(0, [False] * NUM_AC_UNITS) # 5 coils
+db2_di = ModbusSequentialDataBlock(0, [False] * NUM_AC_UNITS) # 5 discrete inputs
+
+log.info(f"Initialized datastore for Unit 1: db1_hr length: {len(db1_hr.values)}, db1_co length: {len(db1_co.values)}, db1_di length: {len(db1_di.values)}")
+log.info(f"Initialized datastore for Unit 2: db2_hr length: {len(db2_hr.values)}, db2_co length: {len(db2_co.values)}, db2_di length: {len(db2_di.values)}")
 
 context = ModbusServerContext(
     slaves={
@@ -50,52 +44,71 @@ context = ModbusServerContext(
 )
 
 identity = ModbusDeviceIdentification()
-identity.VendorName = 'Gemini 18-Reg Per-AC AutoTemp'
-identity.ProductName = '18-Register Per-AC AutoTemp Server'
+identity.VendorName = 'Gemini 16-Reg (5AC+Dummy) AutoTemp'
+identity.ProductName = '16-Register AutoTemp Server (5ACs)'
 
 def update_discrete_inputs_thread(update_interval=0.5):
-    # ... (rest of the function as it was in the last version of modserver_sample.py)
     datablocks_config = [{'co_block': db1_co, 'di_block': db1_di}, {'co_block': db2_co, 'di_block': db2_di}]
     while True:
         with data_lock:
             for db_set in datablocks_config:
-                coil_vals = db_set['co_block'].getValues(0, count=6)
+                coil_vals = db_set['co_block'].getValues(0, count=NUM_AC_UNITS)
                 db_set['di_block'].setValues(0, coil_vals)
         time.sleep(update_interval)
 
 def update_temperature_and_coils_thread(update_interval=0.5):
-    # ... (rest of the function as it was in the last version of modserver_sample.py)
     datablocks_config = [
-        {'hr_block': db1_hr, 'co_block': db1_co},
-        {'hr_block': db2_hr, 'co_block': db2_co}
+        {'hr_block': db1_hr, 'co_block': db1_co, 'unit_num': 1},
+        {'hr_block': db2_hr, 'co_block': db2_co, 'unit_num': 2}
     ]
     while True:
         with data_lock:
             for db_set in datablocks_config:
                 hr_block = db_set['hr_block']
                 co_block = db_set['co_block']
-                hr_all_vals = hr_block.getValues(0, count=18)
-                current_temperatures = hr_all_vals[0:6]
-                high_temp_thresholds = hr_all_vals[6:12]
-                good_temp_thresholds = hr_all_vals[12:18]
-                _current_coils_for_deadband = co_block.getValues(0, count=6)
+                unit_num_for_log = db_set['unit_num']
+
+                log.debug(f"[Unit {unit_num_for_log}] Update cycle. Current hr_block.values length: {len(hr_block.values)}")
+                hr_all_vals = hr_block.getValues(0, count=16) # Requesting 16 registers
+                log.debug(f"[Unit {unit_num_for_log}] Read hr_all_vals (requested count 16): {hr_all_vals} (Actual length: {len(hr_all_vals)})")
+
+                if len(hr_all_vals) != 16:
+                    log.error(f"[Unit {unit_num_for_log}] CRITICAL: Expected 16 HRs but read {len(hr_all_vals)}. Skipping update cycle for this unit.")
+                    continue # Skip this unit if data length is wrong
+
+                current_temperatures = hr_all_vals[0:NUM_AC_UNITS] # First 5
+                high_temp_thresholds = hr_all_vals[NUM_AC_UNITS : NUM_AC_UNITS*2] # Next 5
+                good_temp_thresholds = hr_all_vals[NUM_AC_UNITS*2 : NUM_AC_UNITS*3] # Next 5
+                dummy_value = hr_all_vals[NUM_AC_UNITS*3] # Last one is dummy (index 15)
+
+                _current_coils_for_deadband = co_block.getValues(0, count=NUM_AC_UNITS)
                 new_coil_statuses = list(_current_coils_for_deadband)
-                for i in range(6):
+
+                for i in range(NUM_AC_UNITS):
                     if current_temperatures[i] > high_temp_thresholds[i]:
                         new_coil_statuses[i] = True
                     elif current_temperatures[i] < good_temp_thresholds[i]:
                         new_coil_statuses[i] = False
+
                 co_block.setValues(0, new_coil_statuses)
+
                 simulated_temperatures = list(current_temperatures)
-                for i in range(6):
+                for i in range(NUM_AC_UNITS):
                     if new_coil_statuses[i]:
                         if simulated_temperatures[i] > 7:
                             simulated_temperatures[i] -= 1
                     else:
                         if simulated_temperatures[i] < 30:
                             simulated_temperatures[i] += 1
-                updated_hr_values = simulated_temperatures + high_temp_thresholds + good_temp_thresholds
+
+                log.debug(f"[Unit {unit_num_for_log}] Temps (before sim): {current_temperatures}, Coils: {new_coil_statuses}, Temps (after sim): {simulated_temperatures}")
+                log.debug(f"[Unit {unit_num_for_log}] Thresholds high: {high_temp_thresholds}, good: {good_temp_thresholds}")
+
+                updated_hr_values = simulated_temperatures + high_temp_thresholds + good_temp_thresholds + [dummy_value] # Preserve original dummy
+                log.debug(f"[Unit {unit_num_for_log}] Writing updated_hr_values (len {len(updated_hr_values)}): {updated_hr_values}")
                 hr_block.setValues(0, updated_hr_values)
+                log.debug(f"[Unit {unit_num_for_log}] After setValues, hr_block.values: {hr_block.values[:16]}...")
+
         time.sleep(update_interval)
 
 def run_server():
@@ -105,8 +118,7 @@ def run_server():
     thread_di_update.start()
     thread_temp_coil_update.start()
 
-    log.info(f"Modbus 서버 (18-레지스터, 개별 AC 자동온도조절 모드)를 시작합니다. 포트: 5020")
-    # Pymodbus StartTcpServer will use the root logger settings (DEBUG from basicConfig)
+    log.info(f"Modbus 서버 (16-레지스터, 5AC+Dummy) 시작. 포트: 5020")
     StartTcpServer(context=context, identity=identity, address=("0.0.0.0", 5020))
 
 if __name__ == "__main__":
