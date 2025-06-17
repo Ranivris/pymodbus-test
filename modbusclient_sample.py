@@ -2,30 +2,21 @@ from flask import Flask, jsonify, render_template_string, request
 from pymodbus.client import ModbusTcpClient
 import logging
 
-# Initialize Flask app first to use app.logger if desired, or set up custom logger carefully.
 app = Flask(__name__)
 
-# Configure custom logger
 custom_log = logging.getLogger('modbus_client_app')
-custom_log.setLevel(logging.DEBUG) # Set overall level to DEBUG
+custom_log.setLevel(logging.DEBUG)
 
-# Check if handlers are already added
-# and add one if not, to ensure output.
 if not custom_log.handlers:
     ch = logging.StreamHandler()
-    ch.setLevel(logging.DEBUG) # Ensure handler is also at DEBUG
+    ch.setLevel(logging.DEBUG)
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     ch.setFormatter(formatter)
     custom_log.addHandler(ch)
-    custom_log.propagate = False # Prevent messages from also being handled by the root logger
-
-# Ensure Flask's own logger will show INFO messages (it usually does by default)
-# If Werkzeug logs are visible, app.logger.info() should be too.
-# app.logger.setLevel(logging.INFO) # Or DEBUG if needed for Flask specific debugs
+    custom_log.propagate = False
 
 first_api_data_call = True
 
-# --- Modbus 클라이언트 함수 ---
 def read_registers(client, unit_id, fc, address, count):
     read_map = {
         2: client.read_discrete_inputs,
@@ -70,7 +61,6 @@ def write_single_holding_register(client, unit_id, address, value):
         custom_log.error(f"Modbus HR write 통신 예외 unit {unit_id}, addr {address}: {e}", exc_info=True)
         return False, f"Modbus 통신 예외: {e}"
 
-# --- Flask 라우트 ---
 @app.route('/')
 def index():
     app.logger.info(f"Serving index page. First API data call flag: {first_api_data_call}")
@@ -85,6 +75,8 @@ def get_data():
     else:
         app.logger.info("Request to /api/data (subsequent call)")
 
+    # Fetches data corresponding to 6 ACs (18 HR registers) from server per unit;
+    # frontend logic (JavaScript updateInterface) is responsible for displaying 5 ACs.
     client = ModbusTcpClient("127.0.0.1", port=5020, timeout=2)
     if not client.connect():
         custom_log.error("Failed to connect to Modbus server at 127.0.0.1:5020")
@@ -146,13 +138,13 @@ def set_coil():
         custom_log.warning(f"Invalid parameters for /api/write_coil: {request.args}, error: {e}")
         return jsonify({"error": "잘못된 파라미터 (코일)"}), 400
 
-    app.logger.info(f"Request to /api/write_coil: unit={unit_id}, ac_idx/addr={address}, value={value}") # Using app.logger for route-level info
+    app.logger.info(f"Request to /api/write_coil: unit={unit_id}, ac_idx/addr={address}, value={value}")
     client = ModbusTcpClient("127.0.0.1", port=5020, timeout=2)
     if not client.connect():
         custom_log.error("Failed to connect to Modbus server for write_coil")
         return jsonify({"error": "Modbus 서버 연결 실패"}), 500
     try:
-        success, error = write_coil_register(client, unit_id, address, value) # This will log using custom_log.info
+        success, error = write_coil_register(client, unit_id, address, value)
         if success:
             custom_log.info(f"Successfully processed /api/write_coil for unit {unit_id}, addr {address}")
             return jsonify({"success": True})
@@ -182,7 +174,7 @@ def set_temp_threshold():
         custom_log.warning(f"Invalid parameters for /api/write_temp_threshold: {request.args}, error: {e}")
         return jsonify({"error": "잘못된 파라미터 (온도 임계값)"}), 400
 
-    app.logger.info(f"Request to /api/write_temp_threshold: unit={unit_id}, ac_idx={ac_index}, high={high_temp}, good={good_temp}") # Using app.logger
+    app.logger.info(f"Request to /api/write_temp_threshold: unit={unit_id}, ac_idx={ac_index}, high={high_temp}, good={good_temp}")
     client = ModbusTcpClient("127.0.0.1", port=5020, timeout=2)
     if not client.connect():
         custom_log.error("Failed to connect to Modbus server for write_temp_threshold")
@@ -191,12 +183,12 @@ def set_temp_threshold():
         addr_high_T = 6 + ac_index
         addr_good_T = 12 + ac_index
 
-        success1, error1 = write_single_holding_register(client, unit_id, addr_high_T, high_temp) # Uses custom_log.info
+        success1, error1 = write_single_holding_register(client, unit_id, addr_high_T, high_temp)
         if not success1:
             custom_log.warning(f"Failed to write high_temp for unit {unit_id}, ac_idx {ac_index}: {error1}")
             return jsonify({"error": f"상한 온도 쓰기 실패: {error1}"}), 500
 
-        success2, error2 = write_single_holding_register(client, unit_id, addr_good_T, good_temp) # Uses custom_log.info
+        success2, error2 = write_single_holding_register(client, unit_id, addr_good_T, good_temp)
         if not success2:
             custom_log.warning(f"Failed to write good_temp for unit {unit_id}, ac_idx {ac_index}: {error2}")
             return jsonify({"error": f"하한 온도 쓰기 실패: {error2}"}), 500
@@ -249,7 +241,7 @@ HTML_PAGE = """
             console.error('Fetch Error Details:', error);
             const tableBody = document.getElementById('modbus-table-body');
             if (tableBody) {
-                tableBody.innerHTML = `<tr><td colspan="5">데이터 로드 실패: ${error.message.replace(/\n/g, '<br>')}</td></tr>`;
+                tableBody.innerHTML = `<tr><td colspan="5">데이터 로드 실패: ${error.message.replace(/\\n/g, '<br>')}</td></tr>`;
             } else {
                 console.error("Could not find 'modbus-table-body' to display error.");
             }
@@ -279,7 +271,8 @@ HTML_PAGE = """
 
                 console.log(`Processing Unit ${unit.id}: Temps(${temps.length}), HighTs(${highTs.length}), GoodTs(${goodTs.length}), Inputs(${inputs.length})`);
 
-                for (let i = 0; i < 6; i++) {
+                // Displaying 5 ACs per unit as AC #6 (index 5) data from server is currently not used by UI.
+                for (let i = 0; i < 5; i++) {
                     const temp = temps[i] ?? 'N/A';
                     const status = typeof inputs[i] === 'boolean' ? (inputs[i] ? '🟢 ON' : '🔴 OFF') : 'N/A';
                     const highT = highTs[i] ?? 27;
@@ -315,7 +308,7 @@ HTML_PAGE = """
             console.error("Error during updateInterface:", e);
             const tableBody = document.getElementById('modbus-table-body');
             if (tableBody) {
-                 tableBody.innerHTML = `<tr><td colspan="5">UI 업데이트 중 오류 발생: ${e.message.replace(/\n/g, '<br>')}</td></tr>`;
+                 tableBody.innerHTML = `<tr><td colspan="5">UI 업데이트 중 오류 발생: ${e.message.replace(/\\n/g, '<br>')}</td></tr>`;
             }
         }
     }
@@ -385,7 +378,4 @@ HTML_PAGE = """
 """
 
 if __name__ == '__main__':
-    # Using app.logger for route INFO messages will rely on Flask's default logging setup.
-    # Werkzeug usually shows INFO level logs from Flask's app.logger.
-    # The custom_log 'modbus_client_app' is set up with its own handler and DEBUG level.
     app.run(host="0.0.0.0", port=8000, debug=False)
