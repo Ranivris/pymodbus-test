@@ -47,17 +47,16 @@ identity = ModbusDeviceIdentification()
 identity.VendorName = 'Gemini 16-Reg (5AC+Dummy) AutoTemp'
 identity.ProductName = '16-Register AutoTemp Server (5ACs)'
 
-def update_discrete_inputs_thread(update_interval=0.5):
+def update_discrete_inputs_thread(update_interval=2): # Changed default to 2
     datablocks_config = [{'co_block': db1_co, 'di_block': db1_di}, {'co_block': db2_co, 'di_block': db2_di}]
     while True:
         with data_lock:
             for db_set in datablocks_config:
-                # Ensure coil_vals are read with NUM_AC_UNITS count
                 coil_vals = db_set['co_block'].getValues(0, count=NUM_AC_UNITS)
-                db_set['di_block'].setValues(0, coil_vals) # coil_vals will be length NUM_AC_UNITS
+                db_set['di_block'].setValues(0, coil_vals)
         time.sleep(update_interval)
 
-def update_temperature_and_coils_thread(update_interval=0.5):
+def update_temperature_and_coils_thread(update_interval=2): # Changed default to 2
     datablocks_config = [
         {'hr_block': db1_hr, 'co_block': db1_co, 'unit_num': 1},
         {'hr_block': db2_hr, 'co_block': db2_co, 'unit_num': 2}
@@ -80,11 +79,10 @@ def update_temperature_and_coils_thread(update_interval=0.5):
                 current_temperatures = hr_all_vals[0:NUM_AC_UNITS]
                 high_temp_thresholds = hr_all_vals[NUM_AC_UNITS : NUM_AC_UNITS*2]
                 good_temp_thresholds = hr_all_vals[NUM_AC_UNITS*2 : NUM_AC_UNITS*3]
-                dummy_value = hr_all_vals[NUM_AC_UNITS*3] # Index 15 for NUM_AC_UNITS = 5
+                dummy_value = hr_all_vals[NUM_AC_UNITS*3]
 
-                # Ensure coil operations use NUM_AC_UNITS
                 _current_coils_for_deadband = co_block.getValues(0, count=NUM_AC_UNITS)
-                new_coil_statuses = list(_current_coils_for_deadband) # List of size NUM_AC_UNITS
+                new_coil_statuses = list(_current_coils_for_deadband)
 
                 for i in range(NUM_AC_UNITS):
                     if current_temperatures[i] > high_temp_thresholds[i]:
@@ -92,7 +90,7 @@ def update_temperature_and_coils_thread(update_interval=0.5):
                     elif current_temperatures[i] < good_temp_thresholds[i]:
                         new_coil_statuses[i] = False
 
-                co_block.setValues(0, new_coil_statuses) # new_coil_statuses is size NUM_AC_UNITS
+                co_block.setValues(0, new_coil_statuses)
 
                 simulated_temperatures = list(current_temperatures)
                 for i in range(NUM_AC_UNITS):
@@ -115,12 +113,13 @@ def update_temperature_and_coils_thread(update_interval=0.5):
 
 def run_server():
     thread_di_update = threading.Thread(target=update_discrete_inputs_thread, daemon=True)
-    thread_temp_coil_update = threading.Thread(target=update_temperature_and_coils_thread, args=(0.5,), daemon=True)
+    # Removed args, so it uses the new default interval of 2s from the function signature
+    thread_temp_coil_update = threading.Thread(target=update_temperature_and_coils_thread, daemon=True)
 
     thread_di_update.start()
     thread_temp_coil_update.start()
 
-    log.info(f"Modbus 서버 (16-레지스터, 5AC+Dummy) 시작. 포트: 5020")
+    log.info(f"Modbus 서버 (16-레지스터, 5AC+Dummy, 2s update) 시작. 포트: 5020") # Updated log message
     StartTcpServer(context=context, identity=identity, address=("0.0.0.0", 5020))
 
 if __name__ == "__main__":
