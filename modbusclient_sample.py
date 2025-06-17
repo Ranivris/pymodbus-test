@@ -4,7 +4,7 @@ import logging # Make sure logging is imported
 
 # Configure logging for the Flask app / Modbus client part
 log = logging.getLogger('modbus_client_app') # Use a specific logger name
-log.setLevel(logging.INFO)
+log.setLevel(logging.DEBUG) # Set overall level to DEBUG to catch debug messages
 # If running in an environment where basicConfig might have already been called by server,
 # ensure handler is added if no handlers are present.
 if not log.handlers:
@@ -13,6 +13,7 @@ if not log.handlers:
     stream_handler.setFormatter(formatter)
     log.addHandler(stream_handler)
 
+first_api_data_call = True
 
 # --- Modbus 클라이언트 함수 ---
 def read_registers(client, unit_id, fc, address, count):
@@ -24,12 +25,11 @@ def read_registers(client, unit_id, fc, address, count):
     if not func:
         return None, f"지원하지 않는 Function Code: {fc}"
     try:
-        # log.debug(f"Reading from unit {unit_id}, FC {fc}, addr {address}, count {count}")
+        log.debug(f"Reading from unit {unit_id}, FC {fc}, addr {address}, count {count}")
         response = func(address, count=count, slave=unit_id)
         if response.isError():
             log.warning(f"Modbus error from unit {unit_id}, FC {fc}, addr {address}: {response}")
             return None, f"읽기 오류: {response}"
-        # log.debug(f"Successfully read from unit {unit_id}, FC {fc}, addr {address}. Response: {response}")
         return response.registers if fc == 3 else response.bits[:count], None
     except Exception as e:
         log.error(f"Modbus 통신 예외 unit {unit_id}, FC {fc}, addr {address}: {e}", exc_info=True)
@@ -37,12 +37,11 @@ def read_registers(client, unit_id, fc, address, count):
 
 def write_coil_register(client, unit_id, address, value):
     try:
-        # log.debug(f"Writing coil to unit {unit_id}, addr {address}, value {value}")
+        log.info(f"Writing coil to unit {unit_id}, addr {address}, value {value}")
         response = client.write_coil(address, value, slave=unit_id)
         if response.isError():
             log.warning(f"Modbus coil write error unit {unit_id}, addr {address}: {response}")
             return False, f"쓰기 오류: {response}"
-        # log.debug(f"Successfully wrote coil to unit {unit_id}, addr {address}")
         return True, None
     except Exception as e:
         log.error(f"Modbus coil write 통신 예외 unit {unit_id}, addr {address}: {e}", exc_info=True)
@@ -51,12 +50,11 @@ def write_coil_register(client, unit_id, address, value):
 def write_single_holding_register(client, unit_id, address, value):
     """Holding register 한 개 쓰기 요청을 처리하는 함수"""
     try:
-        # log.debug(f"Writing HR to unit {unit_id}, addr {address}, value {value}")
+        log.info(f"Writing HR to unit {unit_id}, addr {address}, value {value}")
         response = client.write_register(address, value, slave=unit_id)
         if response.isError():
             log.warning(f"Modbus HR write error unit {unit_id}, addr {address}: {response}")
             return False, f"쓰기 오류: {response}"
-        # log.debug(f"Successfully wrote HR to unit {unit_id}, addr {address}")
         return True, None
     except Exception as e:
         log.error(f"Modbus HR write 통신 예외 unit {unit_id}, addr {address}: {e}", exc_info=True)
@@ -71,7 +69,13 @@ def index():
 
 @app.route('/api/data', methods=['GET'])
 def get_data():
-    log.info("Request received for /api/data")
+    global first_api_data_call
+    if first_api_data_call:
+        log.info("First call to /api/data, performing initial data read. Subsequent reads will be logged at DEBUG level by read_registers.")
+        first_api_data_call = False
+    else:
+        log.info("Request received for /api/data") # Or change to log.debug if too verbose for general calls
+
     client = ModbusTcpClient("127.0.0.1", port=5020, timeout=2)
     if not client.connect():
         log.error("Failed to connect to Modbus server at 127.0.0.1:5020")
@@ -115,8 +119,7 @@ def get_data():
             "good_thresholds_2": good_T2,
             "inputs_2": processed_di2_status,
         }
-        log.info(f"Successfully processed data for /api/data. Sending to client.") # Avoid logging full data by default for brevity
-        # log.debug(f"Sending data to client: {response_data}") # If needed for deep debug
+        log.debug(f"Successfully processed data for /api/data. Sending to client.")
         return jsonify(response_data)
     except Exception as e:
         log.error(f"Exception in /api/data endpoint: {e}", exc_info=True)
@@ -143,10 +146,10 @@ def set_coil():
     try:
         success, error = write_coil_register(client, unit_id, address, value)
         if success:
-            log.info(f"Successfully wrote coil for unit {unit_id}, addr {address}")
+            log.info(f"Successfully processed /api/write_coil for unit {unit_id}, addr {address}") # Changed from just 'wrote coil'
             return jsonify({"success": True})
         else:
-            log.warning(f"Failed to write coil for unit {unit_id}, addr {address}: {error}")
+            log.warning(f"Failed to process /api/write_coil for unit {unit_id}, addr {address}: {error}")
             return jsonify({"error": error}), 500
     except Exception as e:
         log.error(f"Exception in /api/write_coil: {e}", exc_info=True)
@@ -191,7 +194,7 @@ def set_temp_threshold():
             log.warning(f"Failed to write good_temp for unit {unit_id}, ac_idx {ac_index}: {error2}")
             return jsonify({"error": f"하한 온도 쓰기 실패: {error2}"}), 500
 
-        log.info(f"Successfully wrote thresholds for unit {unit_id}, ac_idx {ac_index}")
+        log.info(f"Successfully processed /api/write_temp_threshold for unit {unit_id}, ac_idx {ac_index}")
         return jsonify({"success": True}), 200
     except Exception as e:
         log.error(f"Exception in /api/write_temp_threshold: {e}", exc_info=True)
@@ -377,6 +380,6 @@ HTML_PAGE = """
 if __name__ == "__main__":
     # Set up basic logging for when running directly, if not already configured
     # This is a fallback if the logger at the top didn't catch.
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     log.info("Starting Flask app for Modbus client UI.")
-    app.run(host="0.0.0.0", port=8000, debug=False) # debug=False for production/testing
+    app.run(host="0.0.0.0", port=8000, debug=False)
