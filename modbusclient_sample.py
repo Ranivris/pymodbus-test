@@ -1,12 +1,10 @@
 from flask import Flask, jsonify, render_template_string, request
 from pymodbus.client import ModbusTcpClient
-import logging # Make sure logging is imported
+import logging
 
-# Configure logging for the Flask app / Modbus client part
-log = logging.getLogger('modbus_client_app') # Use a specific logger name
+log = logging.getLogger('modbus_client_app')
 log.setLevel(logging.DEBUG) # Set overall level to DEBUG to catch debug messages
-# If running in an environment where basicConfig might have already been called by server,
-# ensure handler is added if no handlers are present.
+
 if not log.handlers:
     stream_handler = logging.StreamHandler()
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -48,7 +46,6 @@ def write_coil_register(client, unit_id, address, value):
         return False, f"Modbus 통신 예외: {e}"
 
 def write_single_holding_register(client, unit_id, address, value):
-    """Holding register 한 개 쓰기 요청을 처리하는 함수"""
     try:
         log.info(f"Writing HR to unit {unit_id}, addr {address}, value {value}")
         response = client.write_register(address, value, slave=unit_id)
@@ -74,7 +71,8 @@ def get_data():
         log.info("First call to /api/data, performing initial data read. Subsequent reads will be logged at DEBUG level by read_registers.")
         first_api_data_call = False
     else:
-        log.info("Request received for /api/data") # Or change to log.debug if too verbose for general calls
+        # Ensuring this path also has a clear log, but perhaps less prominent than the 'first call'
+        log.info("Request received for /api/data (subsequent call)")
 
     client = ModbusTcpClient("127.0.0.1", port=5020, timeout=2)
     if not client.connect():
@@ -129,7 +127,6 @@ def get_data():
 
 @app.route('/api/write_coil', methods=['POST'])
 def set_coil():
-    # ... (existing code, can add logging if needed) ...
     try:
         unit_id = int(request.args.get('unitId'))
         address = int(request.args.get('address'))
@@ -146,7 +143,7 @@ def set_coil():
     try:
         success, error = write_coil_register(client, unit_id, address, value)
         if success:
-            log.info(f"Successfully processed /api/write_coil for unit {unit_id}, addr {address}") # Changed from just 'wrote coil'
+            log.info(f"Successfully processed /api/write_coil for unit {unit_id}, addr {address}")
             return jsonify({"success": True})
         else:
             log.warning(f"Failed to process /api/write_coil for unit {unit_id}, addr {address}: {error}")
@@ -158,7 +155,6 @@ def set_coil():
 
 @app.route('/api/write_temp_threshold', methods=['POST'])
 def set_temp_threshold():
-    # ... (existing code, can add logging if needed) ...
     try:
         unit_id = int(request.args.get('unitId'))
         ac_index = int(request.args.get('acIndex'))
@@ -378,8 +374,6 @@ HTML_PAGE = """
 """
 
 if __name__ == "__main__":
-    # Set up basic logging for when running directly, if not already configured
-    # This is a fallback if the logger at the top didn't catch.
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     log.info("Starting Flask app for Modbus client UI.")
     app.run(host="0.0.0.0", port=8000, debug=False)
