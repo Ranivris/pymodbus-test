@@ -1,4 +1,4 @@
-# final_server_6reg.py
+# final_server_18reg_per_ac_auto_temp.py
 
 import logging
 import threading
@@ -14,14 +14,26 @@ log.setLevel(logging.INFO)
 
 data_lock = threading.Lock()
 
-# [수정] 모든 데이터 블록의 크기를 6으로 변경
-db1_hr = ModbusSequentialDataBlock(0, [15] * 6)
-db1_co = ModbusSequentialDataBlock(0, [False] * 6)
-db1_di = ModbusSequentialDataBlock(0, [False] * 6)
+# Holding registers per slave unit:
+# - 6 for current temperatures (addrs 0-5)
+# - 6 for high_temperature thresholds (addrs 6-11)
+# - 6 for good_temperature thresholds (addrs 12-17)
+# Total = 18 registers
 
-db2_hr = ModbusSequentialDataBlock(0, [15] * 6)
-db2_co = ModbusSequentialDataBlock(0, [False] * 6)
-db2_di = ModbusSequentialDataBlock(0, [False] * 6)
+INITIAL_TEMPS = [15] * 6
+INITIAL_HIGH_THRESHOLDS = [27] * 6
+INITIAL_GOOD_THRESHOLDS = [20] * 6
+
+db1_hr_initial_values = INITIAL_TEMPS + INITIAL_HIGH_THRESHOLDS + INITIAL_GOOD_THRESHOLDS
+db2_hr_initial_values = INITIAL_TEMPS + INITIAL_HIGH_THRESHOLDS + INITIAL_GOOD_THRESHOLDS
+
+db1_hr = ModbusSequentialDataBlock(0, db1_hr_initial_values) # 18 registers
+db1_co = ModbusSequentialDataBlock(0, [False] * 6)          # 6 coils
+db1_di = ModbusSequentialDataBlock(0, [False] * 6)          # 6 discrete inputs
+
+db2_hr = ModbusSequentialDataBlock(0, db2_hr_initial_values) # 18 registers
+db2_co = ModbusSequentialDataBlock(0, [False] * 6)          # 6 coils
+db2_di = ModbusSequentialDataBlock(0, [False] * 6)          # 6 discrete inputs
 
 context = ModbusServerContext(
     slaves={
@@ -32,46 +44,73 @@ context = ModbusServerContext(
 )
 
 identity = ModbusDeviceIdentification()
-identity.VendorName = 'Gemini 6-Reg Test'
-identity.ProductName = '6-Register Test Server'
+identity.VendorName = 'Gemini 18-Reg Per-AC AutoTemp'
+identity.ProductName = '18-Register Per-AC AutoTemp Server'
 
 def update_discrete_inputs_thread(update_interval=0.5):
-    datablocks = [{'co': db1_co, 'di': db1_di}, {'co': db2_co, 'di': db2_di}]
+    datablocks_config = [{'co_block': db1_co, 'di_block': db1_di}, {'co_block': db2_co, 'di_block': db2_di}]
     while True:
         with data_lock:
-            for db in datablocks:
-                # [수정] 6개 읽기
-                coil_vals = db['co'].getValues(0, count=6)
-                db['di'].setValues(0, coil_vals)
+            for db_set in datablocks_config:
+                coil_vals = db_set['co_block'].getValues(0, count=6)
+                db_set['di_block'].setValues(0, coil_vals)
         time.sleep(update_interval)
 
-def update_temperature_thread(update_interval=2):
-    datablocks = [{'hr': db1_hr, 'di': db1_di}, {'hr': db2_hr, 'di': db2_di}]
+def update_temperature_and_coils_thread(update_interval=0.5):
+    datablocks_config = [
+        {'hr_block': db1_hr, 'co_block': db1_co},
+        {'hr_block': db2_hr, 'co_block': db2_co}
+    ]
     while True:
         with data_lock:
-            for db in datablocks:
-                # [수정] 6개 읽기
-                hr_vals = db['hr'].getValues(0, count=6)
-                di_vals = db['di'].getValues(0, count=6)
+            for db_set in datablocks_config:
+                hr_block = db_set['hr_block']
+                co_block = db_set['co_block']
 
-                # [수정] 6개 확인
-                if len(hr_vals) == 6 and len(di_vals) == 6:
-                    # [수정] 6번 반복
-                    for i in range(6):
-                        if di_vals[i]:
-                            if hr_vals[i] > 7: hr_vals[i] -= 1
-                        else:
-                            if hr_vals[i] < 30: hr_vals[i] += 1
-                    db['hr'].setValues(0, hr_vals)
+                # Read all 18 holding registers
+                hr_all_vals = hr_block.getValues(0, count=18)
+                current_temperatures = hr_all_vals[0:6]
+                high_temp_thresholds = hr_all_vals[6:12]
+                good_temp_thresholds = hr_all_vals[12:18]
+
+                _current_coils_for_deadband = co_block.getValues(0, count=6)
+                new_coil_statuses = list(_current_coils_for_deadband)
+
+                # Automatic Control Logic for each AC
+                for i in range(6):
+                    if current_temperatures[i] > high_temp_thresholds[i]:
+                        new_coil_statuses[i] = True  # Turn AC ON
+                    elif current_temperatures[i] < good_temp_thresholds[i]:
+                        new_coil_statuses[i] = False  # Turn AC OFF
+                    # Else: coil status remains as per _current_coils_for_deadband (manual override respected in deadband)
+
+                co_block.setValues(0, new_coil_statuses)
+
+                # Temperature Simulation Logic (based on new coil statuses)
+                simulated_temperatures = list(current_temperatures)
+                for i in range(6):
+                    if new_coil_statuses[i]:  # AC is ON
+                        if simulated_temperatures[i] > 7: # Min temp
+                            simulated_temperatures[i] -= 1
+                    else:  # AC is OFF
+                        if simulated_temperatures[i] < 30: # Max temp
+                            simulated_temperatures[i] += 1
+
+                # Update all 18 holding registers
+                # (updated temperatures + original individual thresholds)
+                updated_hr_values = simulated_temperatures + high_temp_thresholds + good_temp_thresholds
+                hr_block.setValues(0, updated_hr_values)
+
         time.sleep(update_interval)
 
 def run_server():
-    thread1 = threading.Thread(target=update_discrete_inputs_thread, daemon=True)
-    thread2 = threading.Thread(target=update_temperature_thread, daemon=True)
-    thread1.start()
-    thread2.start()
+    thread_di_update = threading.Thread(target=update_discrete_inputs_thread, daemon=True)
+    thread_temp_coil_update = threading.Thread(target=update_temperature_and_coils_thread, args=(0.5,), daemon=True)
 
-    log.info(f"Modbus 서버 (6-레지스터 모드)를 시작합니다. 포트: 5020")
+    thread_di_update.start()
+    thread_temp_coil_update.start()
+
+    log.info(f"Modbus 서버 (18-레지스터, 개별 AC 자동온도조절 모드)를 시작합니다. 포트: 5020")
     StartTcpServer(context=context, identity=identity, address=("0.0.0.0", 5020))
 
 if __name__ == "__main__":
