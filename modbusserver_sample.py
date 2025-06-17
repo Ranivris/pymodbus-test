@@ -8,19 +8,19 @@ from pymodbus.datastore import (ModbusSequentialDataBlock, ModbusServerContext,
 from pymodbus.device import ModbusDeviceIdentification
 from pymodbus.server import StartTcpServer
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.DEBUG) # Ensure DEBUG level for all loggers
 log = logging.getLogger('modbus_server_app')
+# If modbus_server_app needs a different level than root, set it explicitly:
+# log.setLevel(logging.DEBUG)
 
 data_lock = threading.Lock()
 
-# Configuration for 5 AC units + 1 dummy register
 NUM_AC_UNITS = 5
 INITIAL_TEMPS = [15] * NUM_AC_UNITS
 INITIAL_HIGH_THRESHOLDS = [27] * NUM_AC_UNITS
 INITIAL_GOOD_THRESHOLDS = [20] * NUM_AC_UNITS
-LAST_DUMMY_VALUE = [0xFE] # Single dummy value, e.g., 0xFE (254)
+LAST_DUMMY_VALUE = [0xFE]
 
-# HR block: 5 temps + 5 high_T + 5 good_T + 1 dummy = 16 registers
 db1_hr_initial_values = INITIAL_TEMPS + INITIAL_HIGH_THRESHOLDS + INITIAL_GOOD_THRESHOLDS + LAST_DUMMY_VALUE
 db2_hr_initial_values = INITIAL_TEMPS + INITIAL_HIGH_THRESHOLDS + INITIAL_GOOD_THRESHOLDS + LAST_DUMMY_VALUE
 
@@ -52,8 +52,9 @@ def update_discrete_inputs_thread(update_interval=0.5):
     while True:
         with data_lock:
             for db_set in datablocks_config:
+                # Ensure coil_vals are read with NUM_AC_UNITS count
                 coil_vals = db_set['co_block'].getValues(0, count=NUM_AC_UNITS)
-                db_set['di_block'].setValues(0, coil_vals)
+                db_set['di_block'].setValues(0, coil_vals) # coil_vals will be length NUM_AC_UNITS
         time.sleep(update_interval)
 
 def update_temperature_and_coils_thread(update_interval=0.5):
@@ -69,20 +70,21 @@ def update_temperature_and_coils_thread(update_interval=0.5):
                 unit_num_for_log = db_set['unit_num']
 
                 log.debug(f"[Unit {unit_num_for_log}] Update cycle. Current hr_block.values length: {len(hr_block.values)}")
-                hr_all_vals = hr_block.getValues(0, count=16) # Requesting 16 registers
+                hr_all_vals = hr_block.getValues(0, count=16)
                 log.debug(f"[Unit {unit_num_for_log}] Read hr_all_vals (requested count 16): {hr_all_vals} (Actual length: {len(hr_all_vals)})")
 
                 if len(hr_all_vals) != 16:
                     log.error(f"[Unit {unit_num_for_log}] CRITICAL: Expected 16 HRs but read {len(hr_all_vals)}. Skipping update cycle for this unit.")
-                    continue # Skip this unit if data length is wrong
+                    continue
 
-                current_temperatures = hr_all_vals[0:NUM_AC_UNITS] # First 5
-                high_temp_thresholds = hr_all_vals[NUM_AC_UNITS : NUM_AC_UNITS*2] # Next 5
-                good_temp_thresholds = hr_all_vals[NUM_AC_UNITS*2 : NUM_AC_UNITS*3] # Next 5
-                dummy_value = hr_all_vals[NUM_AC_UNITS*3] # Last one is dummy (index 15)
+                current_temperatures = hr_all_vals[0:NUM_AC_UNITS]
+                high_temp_thresholds = hr_all_vals[NUM_AC_UNITS : NUM_AC_UNITS*2]
+                good_temp_thresholds = hr_all_vals[NUM_AC_UNITS*2 : NUM_AC_UNITS*3]
+                dummy_value = hr_all_vals[NUM_AC_UNITS*3] # Index 15 for NUM_AC_UNITS = 5
 
+                # Ensure coil operations use NUM_AC_UNITS
                 _current_coils_for_deadband = co_block.getValues(0, count=NUM_AC_UNITS)
-                new_coil_statuses = list(_current_coils_for_deadband)
+                new_coil_statuses = list(_current_coils_for_deadband) # List of size NUM_AC_UNITS
 
                 for i in range(NUM_AC_UNITS):
                     if current_temperatures[i] > high_temp_thresholds[i]:
@@ -90,7 +92,7 @@ def update_temperature_and_coils_thread(update_interval=0.5):
                     elif current_temperatures[i] < good_temp_thresholds[i]:
                         new_coil_statuses[i] = False
 
-                co_block.setValues(0, new_coil_statuses)
+                co_block.setValues(0, new_coil_statuses) # new_coil_statuses is size NUM_AC_UNITS
 
                 simulated_temperatures = list(current_temperatures)
                 for i in range(NUM_AC_UNITS):
@@ -101,10 +103,10 @@ def update_temperature_and_coils_thread(update_interval=0.5):
                         if simulated_temperatures[i] < 30:
                             simulated_temperatures[i] += 1
 
-                log.debug(f"[Unit {unit_num_for_log}] Temps (before sim): {current_temperatures}, Coils: {new_coil_statuses}, Temps (after sim): {simulated_temperatures}")
-                log.debug(f"[Unit {unit_num_for_log}] Thresholds high: {high_temp_thresholds}, good: {good_temp_thresholds}")
+                log.debug(f"[Unit {unit_num_for_log}] Temps (before sim): {current_temperatures}, Coils: {new_coil_statuses} (len {len(new_coil_statuses)}), Temps (after sim): {simulated_temperatures}")
+                log.debug(f"[Unit {unit_num_for_log}] Thresholds high: {high_temp_thresholds}, good: {good_temp_thresholds}, dummy: {dummy_value}")
 
-                updated_hr_values = simulated_temperatures + high_temp_thresholds + good_temp_thresholds + [dummy_value] # Preserve original dummy
+                updated_hr_values = simulated_temperatures + high_temp_thresholds + good_temp_thresholds + [dummy_value]
                 log.debug(f"[Unit {unit_num_for_log}] Writing updated_hr_values (len {len(updated_hr_values)}): {updated_hr_values}")
                 hr_block.setValues(0, updated_hr_values)
                 log.debug(f"[Unit {unit_num_for_log}] After setValues, hr_block.values: {hr_block.values[:16]}...")
