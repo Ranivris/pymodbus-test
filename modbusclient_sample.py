@@ -2,14 +2,26 @@ from flask import Flask, jsonify, render_template_string, request
 from pymodbus.client import ModbusTcpClient
 import logging
 
-log = logging.getLogger('modbus_client_app')
-log.setLevel(logging.DEBUG) # Set overall level to DEBUG to catch debug messages
+# Initialize Flask app first to use app.logger if desired, or set up custom logger carefully.
+app = Flask(__name__)
 
-if not log.handlers:
-    stream_handler = logging.StreamHandler()
+# Configure custom logger
+custom_log = logging.getLogger('modbus_client_app')
+custom_log.setLevel(logging.DEBUG) # Set overall level to DEBUG
+
+# Check if handlers are already added
+# and add one if not, to ensure output.
+if not custom_log.handlers:
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.DEBUG) # Ensure handler is also at DEBUG
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    stream_handler.setFormatter(formatter)
-    log.addHandler(stream_handler)
+    ch.setFormatter(formatter)
+    custom_log.addHandler(ch)
+    custom_log.propagate = False # Prevent messages from also being handled by the root logger
+
+# Ensure Flask's own logger will show INFO messages (it usually does by default)
+# If Werkzeug logs are visible, app.logger.info() should be too.
+# app.logger.setLevel(logging.INFO) # Or DEBUG if needed for Flask specific debugs
 
 first_api_data_call = True
 
@@ -21,62 +33,61 @@ def read_registers(client, unit_id, fc, address, count):
     }
     func = read_map.get(fc)
     if not func:
+        custom_log.error(f"Unsupported Function Code: {fc} for unit {unit_id}")
         return None, f"지원하지 않는 Function Code: {fc}"
     try:
-        log.debug(f"Reading from unit {unit_id}, FC {fc}, addr {address}, count {count}")
+        custom_log.debug(f"Reading from unit {unit_id}, FC {fc}, addr {address}, count {count}")
         response = func(address, count=count, slave=unit_id)
         if response.isError():
-            log.warning(f"Modbus error from unit {unit_id}, FC {fc}, addr {address}: {response}")
+            custom_log.warning(f"Modbus error from unit {unit_id}, FC {fc}, addr {address}: {response}")
             return None, f"읽기 오류: {response}"
         return response.registers if fc == 3 else response.bits[:count], None
     except Exception as e:
-        log.error(f"Modbus 통신 예외 unit {unit_id}, FC {fc}, addr {address}: {e}", exc_info=True)
+        custom_log.error(f"Modbus 통신 예외 unit {unit_id}, FC {fc}, addr {address}: {e}", exc_info=True)
         return None, f"Modbus 통신 예외: {e}"
 
 def write_coil_register(client, unit_id, address, value):
     try:
-        log.info(f"Writing coil to unit {unit_id}, addr {address}, value {value}")
+        custom_log.info(f"Writing coil to unit {unit_id}, addr {address}, value {value}")
         response = client.write_coil(address, value, slave=unit_id)
         if response.isError():
-            log.warning(f"Modbus coil write error unit {unit_id}, addr {address}: {response}")
+            custom_log.warning(f"Modbus coil write error unit {unit_id}, addr {address}: {response}")
             return False, f"쓰기 오류: {response}"
         return True, None
     except Exception as e:
-        log.error(f"Modbus coil write 통신 예외 unit {unit_id}, addr {address}: {e}", exc_info=True)
+        custom_log.error(f"Modbus coil write 통신 예외 unit {unit_id}, addr {address}: {e}", exc_info=True)
         return False, f"Modbus 통신 예외: {e}"
 
 def write_single_holding_register(client, unit_id, address, value):
     try:
-        log.info(f"Writing HR to unit {unit_id}, addr {address}, value {value}")
+        custom_log.info(f"Writing HR to unit {unit_id}, addr {address}, value {value}")
         response = client.write_register(address, value, slave=unit_id)
         if response.isError():
-            log.warning(f"Modbus HR write error unit {unit_id}, addr {address}: {response}")
+            custom_log.warning(f"Modbus HR write error unit {unit_id}, addr {address}: {response}")
             return False, f"쓰기 오류: {response}"
         return True, None
     except Exception as e:
-        log.error(f"Modbus HR write 통신 예외 unit {unit_id}, addr {address}: {e}", exc_info=True)
+        custom_log.error(f"Modbus HR write 통신 예외 unit {unit_id}, addr {address}: {e}", exc_info=True)
         return False, f"Modbus 통신 예외: {e}"
 
 # --- Flask 라우트 ---
-app = Flask(__name__)
-
 @app.route('/')
 def index():
+    app.logger.info(f"Serving index page. First API data call flag: {first_api_data_call}")
     return render_template_string(HTML_PAGE)
 
 @app.route('/api/data', methods=['GET'])
 def get_data():
     global first_api_data_call
     if first_api_data_call:
-        log.info("First call to /api/data, performing initial data read. Subsequent reads will be logged at DEBUG level by read_registers.")
+        app.logger.info("First call to /api/data, performing initial data read. Modbus reads by 'modbus_client_app' logger at DEBUG.")
         first_api_data_call = False
     else:
-        # Ensuring this path also has a clear log, but perhaps less prominent than the 'first call'
-        log.info("Request received for /api/data (subsequent call)")
+        app.logger.info("Request to /api/data (subsequent call)")
 
     client = ModbusTcpClient("127.0.0.1", port=5020, timeout=2)
     if not client.connect():
-        log.error("Failed to connect to Modbus server at 127.0.0.1:5020")
+        custom_log.error("Failed to connect to Modbus server at 127.0.0.1:5020")
         return jsonify({"error": "Modbus 서버 연결 실패"}), 500
     try:
         hr1_all, err1_hr = read_registers(client, 1, 3, 0, 18)
@@ -86,13 +97,13 @@ def get_data():
 
         errors = [e for e in [err1_hr, err1_di, err2_hr, err2_di] if e]
         if errors:
-            log.warning(f"Modbus read errors encountered: {errors}")
+            custom_log.warning(f"Modbus read errors encountered: {errors}")
             return jsonify({"error": f"데이터 읽기 중 오류 발생: {'; '.join(errors)}"}), 500
 
         def process_hr_data(hr_data, unit_num_for_log):
             if hr_data and len(hr_data) == 18:
                 return hr_data[0:6], hr_data[6:12], hr_data[12:18]
-            log.warning(f"Invalid hr_data for unit {unit_num_for_log} from Modbus: Length {len(hr_data) if hr_data else 'None'}. Using defaults.")
+            custom_log.warning(f"Invalid hr_data for unit {unit_num_for_log} from Modbus: Length {len(hr_data) if hr_data else 'None'}. Using defaults.")
             return [15]*6, [27]*6, [20]*6
 
         temps1, high_T1, good_T1 = process_hr_data(hr1_all, 1)
@@ -101,7 +112,7 @@ def get_data():
         def process_di_data(di_data, unit_num_for_log):
             if di_data and len(di_data) == 6:
                 return di_data
-            log.warning(f"Invalid di_data for unit {unit_num_for_log} from Modbus: Length {len(di_data) if di_data else 'None'}. Using defaults.")
+            custom_log.warning(f"Invalid di_data for unit {unit_num_for_log} from Modbus: Length {len(di_data) if di_data else 'None'}. Using defaults.")
             return [False]*6
 
         processed_di1_status = process_di_data(di1_status, 1)
@@ -117,10 +128,10 @@ def get_data():
             "good_thresholds_2": good_T2,
             "inputs_2": processed_di2_status,
         }
-        log.debug(f"Successfully processed data for /api/data. Sending to client.")
+        custom_log.debug(f"Successfully processed data for /api/data. Sending to client.")
         return jsonify(response_data)
     except Exception as e:
-        log.error(f"Exception in /api/data endpoint: {e}", exc_info=True)
+        custom_log.error(f"Exception in /api/data endpoint: {e}", exc_info=True)
         return jsonify({"error": "서버 내부 오류 발생"}), 500
     finally:
         client.close()
@@ -132,24 +143,24 @@ def set_coil():
         address = int(request.args.get('address'))
         value = bool(int(request.args.get('value')))
     except Exception as e:
-        log.warning(f"Invalid parameters for /api/write_coil: {request.args}, error: {e}")
+        custom_log.warning(f"Invalid parameters for /api/write_coil: {request.args}, error: {e}")
         return jsonify({"error": "잘못된 파라미터 (코일)"}), 400
 
-    log.info(f"Request to /api/write_coil: unit={unit_id}, ac_idx/addr={address}, value={value}")
+    app.logger.info(f"Request to /api/write_coil: unit={unit_id}, ac_idx/addr={address}, value={value}") # Using app.logger for route-level info
     client = ModbusTcpClient("127.0.0.1", port=5020, timeout=2)
     if not client.connect():
-        log.error("Failed to connect to Modbus server for write_coil")
+        custom_log.error("Failed to connect to Modbus server for write_coil")
         return jsonify({"error": "Modbus 서버 연결 실패"}), 500
     try:
-        success, error = write_coil_register(client, unit_id, address, value)
+        success, error = write_coil_register(client, unit_id, address, value) # This will log using custom_log.info
         if success:
-            log.info(f"Successfully processed /api/write_coil for unit {unit_id}, addr {address}")
+            custom_log.info(f"Successfully processed /api/write_coil for unit {unit_id}, addr {address}")
             return jsonify({"success": True})
         else:
-            log.warning(f"Failed to process /api/write_coil for unit {unit_id}, addr {address}: {error}")
+            custom_log.warning(f"Failed to process /api/write_coil for unit {unit_id}, addr {address}: {error}")
             return jsonify({"error": error}), 500
     except Exception as e:
-        log.error(f"Exception in /api/write_coil: {e}", exc_info=True)
+        custom_log.error(f"Exception in /api/write_coil: {e}", exc_info=True)
         return jsonify({"error": "코일 쓰기 중 서버 내부 오류"}), 500
     finally: client.close()
 
@@ -162,38 +173,38 @@ def set_temp_threshold():
         good_temp = int(request.args.get('goodTemp'))
 
         if not (0 <= ac_index <= 5):
-            log.warning(f"Invalid ac_index in /api/write_temp_threshold: {ac_index}")
+            custom_log.warning(f"Invalid ac_index in /api/write_temp_threshold: {ac_index}")
             return jsonify({"error": "잘못된 AC 인덱스입니다."}), 400
         if not (0 <= high_temp <= 50 and 0 <= good_temp <= 50 and good_temp < high_temp):
-            log.warning(f"Invalid temp values in /api/write_temp_threshold: high={high_temp}, good={good_temp}")
+            custom_log.warning(f"Invalid temp values in /api/write_temp_threshold: high={high_temp}, good={good_temp}")
             return jsonify({"error": "잘못된 온도 설정 값입니다."}), 400
     except Exception as e:
-        log.warning(f"Invalid parameters for /api/write_temp_threshold: {request.args}, error: {e}")
+        custom_log.warning(f"Invalid parameters for /api/write_temp_threshold: {request.args}, error: {e}")
         return jsonify({"error": "잘못된 파라미터 (온도 임계값)"}), 400
 
-    log.info(f"Request to /api/write_temp_threshold: unit={unit_id}, ac_idx={ac_index}, high={high_temp}, good={good_temp}")
+    app.logger.info(f"Request to /api/write_temp_threshold: unit={unit_id}, ac_idx={ac_index}, high={high_temp}, good={good_temp}") # Using app.logger
     client = ModbusTcpClient("127.0.0.1", port=5020, timeout=2)
     if not client.connect():
-        log.error("Failed to connect to Modbus server for write_temp_threshold")
+        custom_log.error("Failed to connect to Modbus server for write_temp_threshold")
         return jsonify({"error": "Modbus 서버 연결 실패"}), 500
     try:
         addr_high_T = 6 + ac_index
         addr_good_T = 12 + ac_index
 
-        success1, error1 = write_single_holding_register(client, unit_id, addr_high_T, high_temp)
+        success1, error1 = write_single_holding_register(client, unit_id, addr_high_T, high_temp) # Uses custom_log.info
         if not success1:
-            log.warning(f"Failed to write high_temp for unit {unit_id}, ac_idx {ac_index}: {error1}")
+            custom_log.warning(f"Failed to write high_temp for unit {unit_id}, ac_idx {ac_index}: {error1}")
             return jsonify({"error": f"상한 온도 쓰기 실패: {error1}"}), 500
 
-        success2, error2 = write_single_holding_register(client, unit_id, addr_good_T, good_temp)
+        success2, error2 = write_single_holding_register(client, unit_id, addr_good_T, good_temp) # Uses custom_log.info
         if not success2:
-            log.warning(f"Failed to write good_temp for unit {unit_id}, ac_idx {ac_index}: {error2}")
+            custom_log.warning(f"Failed to write good_temp for unit {unit_id}, ac_idx {ac_index}: {error2}")
             return jsonify({"error": f"하한 온도 쓰기 실패: {error2}"}), 500
 
-        log.info(f"Successfully processed /api/write_temp_threshold for unit {unit_id}, ac_idx {ac_index}")
+        custom_log.info(f"Successfully processed /api/write_temp_threshold for unit {unit_id}, ac_idx {ac_index}")
         return jsonify({"success": True}), 200
     except Exception as e:
-        log.error(f"Exception in /api/write_temp_threshold: {e}", exc_info=True)
+        custom_log.error(f"Exception in /api/write_temp_threshold: {e}", exc_info=True)
         return jsonify({"error": "임계값 쓰기 중 서버 내부 오류"}), 500
     finally: client.close()
 
@@ -373,7 +384,8 @@ HTML_PAGE = """
 </html>
 """
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    log.info("Starting Flask app for Modbus client UI.")
+if __name__ == '__main__':
+    # Using app.logger for route INFO messages will rely on Flask's default logging setup.
+    # Werkzeug usually shows INFO level logs from Flask's app.logger.
+    # The custom_log 'modbus_client_app' is set up with its own handler and DEBUG level.
     app.run(host="0.0.0.0", port=8000, debug=False)
